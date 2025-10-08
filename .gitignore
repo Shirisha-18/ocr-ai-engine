@@ -59,6 +59,9 @@ target/
 # DotEnv configuration
 .env
 
+# Vision Key API configuration
+vision_key.json
+
 # Database
 *.db
 *.rdb
