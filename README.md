@@ -58,7 +58,7 @@
 
 ## Environment Setup
 
-1. **Create and activate Conda environment**
+**1. Create and activate Conda environment**
 
 ```
 conda create -n gcp-cloud-vision python=3.12 -y
@@ -66,7 +66,7 @@ conda activate gcp-cloud-vision
 Install required packages
 ```
 
-2. **Install required packages**
+**2. Install required packages**
 
 ## Google Cloud Vision Setup
 
