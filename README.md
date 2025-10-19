@@ -63,10 +63,12 @@
 ```
 conda create -n gcp-cloud-vision python=3.12 -y
 conda activate gcp-cloud-vision
-Install required packages
 ```
 
 **2. Install required packages**
+```
+Install required packages
+```
 
 ## Google Cloud Vision Setup
 
