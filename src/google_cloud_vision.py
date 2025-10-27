@@ -1,100 +1,103 @@
 import os
-from os import listdir
-from os.path import isfile, join
 from google.cloud import vision
-from my_timer import my_timer  # works because both files are in src/
-
+import xml.etree.ElementTree as ET
+from my_timer import my_timer
 
 # Set your Google Cloud Vision credentials
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "src/vision_key.json"
 
 
-def detect_text(path):
-    """Detect text in a single image using Google Cloud Vision API."""
+def detect_text(image_path):
+    """Uses Google Cloud Vision OCR to extract text from an image."""
     client = vision.ImageAnnotatorClient()
-    with open(path, "rb") as image_file:
+    with open(image_path, "rb") as image_file:
         content = image_file.read()
     image = vision.Image(content=content)
     response = client.text_detection(image=image)
-    texts = response.text_annotations
 
     if response.error.message:
-        raise Exception(
-            f"{response.error.message}\nFor more info: https://cloud.google.com/apis/design/errors"
-        )
+        raise Exception(response.error.message)
 
+    texts = response.text_annotations
     return texts[0].description if texts else ""
+
+
+def get_page_ranges(xml_path):
+    """Extracts page ranges from XML based on logic described."""
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    def extract_range(tag):
+        elem = root.find(f".//{tag}")
+        if elem is not None:
+            begin = elem.find("begin")
+            end = elem.find("end")
+            if begin is not None and end is not None:
+                return (int(begin.text), int(end.text))
+        return None
+
+    abstract = extract_range("abstract-pages")
+    claims = extract_range("claims-pages")
+    description = extract_range("description-pages")
+
+    # Rule:
+    if abstract:
+        return [abstract, claims]
+    else:
+        return [description, claims]
 
 
 @my_timer
 def main():
-    # Determine project root relative to this script
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    print("[DEBUG] Project root:", project_root)
+    source_root = r"C:\Users\shiri\Dropbox\ocr_patents\patent_images_sample\480"
+    output_root = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\480"
 
-    # Path to images
-    mypath = join(project_root, "data", "raw")
-    print("[DEBUG] Looking for images in:", mypath)
+    for folder in os.listdir(source_root):
+        folder_path = os.path.join(source_root, folder)
+        if not os.path.isdir(folder_path):
+            continue
 
-    # List all image files
-    all_files = [
-        f
-        for f in listdir(mypath)
-        if isfile(join(mypath, f))
-        and f.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff"))
-    ]
-    print("[DEBUG] Found files:", all_files)
+        print(f"\n📁 Processing folder: {folder}")
 
-    if not all_files:
-        print("[INFO] No image files found in data/raw/")
-        return
+        # Find XML
+        xml_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".xml")]
+        if not xml_files:
+            print("⚠ No XML file found — skipping folder.")
+            continue
 
-    # Show available images
-    print("\nAvailable image files:")
-    for i, f in enumerate(all_files, start=1):
-        print(f"{i}. {f}")
+        xml_path = os.path.join(folder_path, xml_files[0])
+        page_ranges = get_page_ranges(xml_path)
 
-    # Ask user which ones to process
-    selected = input(
-        "\nEnter image numbers to process (comma-separated, e.g. 1,3,5) or 'all': "
-    ).strip()
+        # Create output folder
+        out_folder = os.path.join(output_root, folder)
+        os.makedirs(out_folder, exist_ok=True)
 
-    if selected.lower() == "all":
-        chosen_files = all_files
-    else:
-        try:
-            indices = [int(i.strip()) - 1 for i in selected.split(",")]
-            chosen_files = [all_files[i] for i in indices if 0 <= i < len(all_files)]
-        except ValueError:
-            print("[ERROR] Invalid input format.")
-            return
+        for start, end in page_ranges:
+            for page_num in range(start, end + 1):
+                filename = f"{page_num:08d}.tif"
+                image_path = os.path.join(folder_path, filename)
 
-    if not chosen_files:
-        print("[INFO] No valid files selected.")
-        return
+                if not os.path.exists(image_path):
+                    print(f"⚠ Missing page: {filename}")
+                    continue
 
-    # Process selected files
-    for image_file in chosen_files:
-        image_path = join(mypath, image_file)
-        try:
-            text = detect_text(image_path)
-            print("\n==============================")
-            print(f"Image: {image_file}")
-            print(text[:500])  # print first 500 characters
+                print(f"🔍 OCR Processing: {filename}")
+                try:
+                    text = detect_text(image_path)
+                except Exception as e:
+                    print(f"❌ Error OCR on {filename}: {e}")
+                    continue
 
-            # Save text to file
-            text_file = join(
-                project_root,
-                "data",
-                "interim",
-                f"{os.path.splitext(image_file)[0]}_text.txt",
-            )
-            with open(text_file, "w", encoding="utf-8") as f:
-                f.write(text)
-            print(f"[INFO] OCR text saved to {text_file}")
+                # Save text file
+                out_file = os.path.join(
+                    out_folder, f"{os.path.splitext(filename)[0]}_text.txt"
+                )
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(text)
 
-        except Exception as e:
-            print(f"[ERROR] Failed to process {image_file}: {e}")
+                print(f"✅ Saved: {out_file}")
+
+    print("\n🎉 Extraction completed successfully!")
 
 
 if __name__ == "__main__":
