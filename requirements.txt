@@ -1,3 +1,4 @@
 ipykernel
 python-dotenv
 google-cloud-vision
+tqdm
