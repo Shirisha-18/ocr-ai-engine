@@ -1,19 +1,21 @@
 import os
 import re
 import csv
+import time
 from datetime import datetime
 from difflib import get_close_matches
-import geonamescache
+from geopy.geocoders import Nominatim
 
 OCR_ROOT = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\random_sample"
 OUTPUT_FILE = rf"C:\Users\shiri\Dropbox\ocr_patents\info\metadata_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-# Load city database from geonamescache
-gc = geonamescache.GeonamesCache()
-CITIES = {c["name"].lower(): c for c in gc.get_cities().values()}
+# Initialize Nominatim geolocator
+geolocator = Nominatim(user_agent="patent_location_checker")
+location_cache = {}
 
 
 def fix_month_typo(raw_date):
+    """Automatically correct OCR month typos."""
     months = [
         "January",
         "February",
@@ -48,6 +50,7 @@ def fix_month_typo(raw_date):
 
 
 def normalize_date(raw_date):
+    """Convert various date formats to MM/DD/YYYY format."""
     if not raw_date:
         return ""
     raw_date = fix_month_typo(raw_date)
@@ -63,7 +66,7 @@ def normalize_date(raw_date):
     for fmt in date_formats:
         try:
             dt = datetime.strptime(raw_date, fmt)
-            return dt.strftime("%m/%d/%Y")  # MM/DD/YYYY
+            return dt.strftime("%m/%d/%Y")
         except:
             continue
     return raw_date
@@ -77,6 +80,7 @@ def split_header_body(text, max_header_lines=12):
 
 
 def extract_names_and_locations(header_lines, body_text):
+    # Header: CITY, STATE
     name_header, location_header = "", ""
     for line in header_lines:
         match = re.search(
@@ -91,25 +95,27 @@ def extract_names_and_locations(header_lines, body_text):
             )
             break
 
+    # Body: COUNTY, CITY, STATE
     body_match = re.search(
-        r"I, ([A-Z][A-Za-z\s\.\-']+), (?:a resident of |citizen of |residing at )?(.+?), in the county of (.+?) and State of (.+?)",
+        r"(?:residing at|resident of|of) ([A-Za-z\s\.\-']+), in the county of ([A-Za-z\s\.\-]+) and State of ([A-Za-z\s\.\-]+)",
         body_text,
-        re.IGNORECASE | re.DOTALL,
+        re.IGNORECASE,
     )
     if body_match:
-        name_body = body_match.group(1).title()
-        city_body = body_match.group(2).strip().title()
-        county_body = body_match.group(3).strip().title()
-        state_body = body_match.group(4).strip().title()
+        city_body = body_match.group(1).title()
+        county_body = body_match.group(2).title()
+        state_body = body_match.group(3).title()
         location_body = f"{county_body} County, {city_body}, {state_body}"
+        name_body = name_header  # fallback
     else:
-        name_body = name_header
         location_body = location_header
+        name_body = name_header
 
     return name_header, name_body, location_header, location_body
 
 
 def extract_date(text):
+    """Extract any common date format from text and normalize it."""
     date_regex = r"(\b(?:[A-Za-z]+\.?\s\d{1,2},\s\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})\b)"
     match = re.search(date_regex, text)
     if match:
@@ -127,14 +133,21 @@ def get_first_text_file(folder_path):
     return txt_files_sorted[0]
 
 
-# --- New function to validate location ---
-def is_location_real(location_text):
-    parts = [p.strip() for p in location_text.split(",")]
-    if len(parts) >= 2:
-        city = parts[-2].lower()
-        if city in CITIES:
-            return "YES"
-    return "NO"
+def is_location_real(location):
+    """Check if a location exists globally using Nominatim (cached)."""
+    if not location or location.strip() == "":
+        return False
+    if location in location_cache:
+        return location_cache[location]
+    try:
+        loc = geolocator.geocode(location)
+        time.sleep(1)  # respect rate limit
+        exists = loc is not None
+        location_cache[location] = exists
+        return exists
+    except:
+        location_cache[location] = False
+        return False
 
 
 def run_metadata_extraction():
@@ -166,8 +179,10 @@ def run_metadata_extraction():
 
         names_missing = "YES" if not name_header and not name_body else "NO"
         locations_missing = "YES" if not location_header and not location_body else "NO"
-        location_accurate = is_location_real(location_header) or is_location_real(
-            location_body
+        location_accurate = (
+            "YES"
+            if is_location_real(location_header) or is_location_real(location_body)
+            else "NO"
         )
 
         rows.append(
@@ -180,7 +195,7 @@ def run_metadata_extraction():
                 "location_header": location_header,
                 "location_body": location_body,
                 "locations_missing": locations_missing,
-                "location_accurate": "YES" if location_accurate else "NO",
+                "location_accurate": location_accurate,
                 "date": date,
                 "date_missing": "YES" if not date else "NO",
             }

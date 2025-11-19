@@ -1,124 +1,129 @@
-import re
 import os
+import re
 import csv
 from datetime import datetime
-from dateutil import parser
+from difflib import get_close_matches
 
 OCR_ROOT = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\random_sample"
 OUTPUT_FILE = rf"C:\Users\shiri\Dropbox\ocr_patents\info\metadata_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 
-# ----- Split header and body -----
+def fix_month_typo(raw_date):
+    """Automatically correct OCR month typos."""
+    months = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
+    for word in raw_date.split():
+        matches = get_close_matches(word, months, n=1, cutoff=0.7)
+        if matches:
+            raw_date = raw_date.replace(word, matches[0])
+    return raw_date
+
+
+def normalize_date(raw_date):
+    """Convert various date formats to MM/DD/YYYY format."""
+    if not raw_date:
+        return ""
+    raw_date = fix_month_typo(raw_date)
+
+    # Common date formats from OCR
+    date_formats = [
+        "%Y-%m-%d",  # 1870-05-24
+        "%m/%d/%Y",  # 12/6/1910
+        "%m/%d/%y",  # 12/6/10
+        "%b %d, %Y",  # Sep 5, 1911
+        "%B %d, %Y",  # September 5, 1911
+        "%b %d %Y",  # Sep 5 1911 (no comma)
+        "%B %d %Y",  # September 5 1911 (no comma)
+        "%d-%b-%y",  # 5-Sep-11
+        "%d-%B-%y",  # 5-September-11
+    ]
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(raw_date, fmt)
+            return dt.strftime("%m/%d/%Y")
+        except:
+            continue
+    return raw_date
+
+
+def extract_date(text):
+    """Extract any common date format from text and normalize it to MM/DD/YYYY."""
+    date_regex = r"""
+        \b(
+            \d{1,2}[/-]\d{1,2}[/-]\d{2,4} |           # e.g., 7/9/1912, 07-09-12
+            (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|
+                January|February|March|April|May|June|July|August|
+                September|October|November|December)
+            \s+\d{1,2},?\s+\d{4}                     # e.g., July 9, 1912 or July 9 1912
+        )\b
+    """
+    match = re.search(date_regex, text, re.IGNORECASE | re.VERBOSE)
+    if match:
+        return normalize_date(match.group(1))
+    return ""
+
+
 def split_header_body(text, max_header_lines=12):
     lines = text.split("\n")
     header = "\n".join(lines[:max_header_lines])
     body = "\n".join(lines[max_header_lines:])
-    return header, body
+    return header, body, lines[:max_header_lines]
 
 
-# ----- REGEX patterns -----
-NAME_PATTERN = re.compile(r"\b([A-Z][A-Za-z'\-]+(?: [A-Z][A-Za-z'\-]+)*)\b")
-LOCATION_PATTERN = re.compile(
-    r"\b([A-Z][a-zA-Z .'-]+,\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY))\b"
-)
-DATE_PATTERN = re.compile(
-    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|"
-    r"January|February|March|April|May|June|July|August|September|October|November|December)"
-    r"[a-z]*\.?\s+\d{1,2},\s+\d{2,4}"  # Feb 11, 1873
-    r"|\d{1,2}-[A-Za-z]{3}-\d{2,4}"  # 2-Jul-12
-    r"|\d{1,2}\s+[A-Za-z]+,?\s+\d{4}",  # 7 June 1870
-    re.IGNORECASE,
-)
+def extract_names_and_locations(header_lines, body_text):
+    name_header, location_header = "", ""
+    for line in header_lines:
+        match = re.search(
+            r"([A-Z][A-Za-z\s\.\-']+), OF ([A-Z][A-Z\s\.\-']+),? ([A-Z]{2,})?", line
+        )
+        if match:
+            name_header = match.group(1).title()
+            city_header = match.group(2).title()
+            state_header = match.group(3).upper() if match.group(3) else ""
+            location_header = (
+                f"{city_header}, {state_header}" if state_header else city_header
+            )
+            break
 
-
-# ----- Normalize date safely -----
-def normalize_date(raw_date):
-    try:
-        dt = parser.parse(raw_date, fuzzy=True, default=datetime(1900, 1, 1))
-        return dt
-    except Exception:
-        return None  # Invalid date
-
-
-# ----- Check if a string is a valid date candidate -----
-def is_valid_date_candidate(s):
-    s = s.strip()
-    # Skip obvious non-dates
-    invalid_keywords = ["DECEASED", "PATENT", "APPLICATION", "FIG", "NO", "OF"]
-    if any(word in s.upper() for word in invalid_keywords):
-        return False
-    # Must contain at least a month name and a year
-    if not re.search(
-        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)",
-        s,
+    body_match = re.search(
+        r"I, ([A-Z][A-Za-z\s\.\-']+), of ([A-Za-z\s]+), in the county of ([A-Za-z\s]+) and State of ([A-Za-z\s]+)",
+        body_text,
         re.IGNORECASE,
-    ):
-        return False
-    if not re.search(r"\d{2,4}", s):
-        return False
-    return True
-
-
-# ----- Extract metadata -----
-def extract_metadata(text):
-    header, body = split_header_body(text)
-
-    # Names
-    name_header = ", ".join(sorted(set(NAME_PATTERN.findall(header))))
-    name_body = ", ".join(sorted(set(NAME_PATTERN.findall(body))))
-    names_missing = "NO" if name_header or name_body else "INVALID"
-
-    # Locations
-    location_header = ", ".join(sorted(set(LOCATION_PATTERN.findall(header))))
-    location_body = ", ".join(sorted(set(LOCATION_PATTERN.findall(body))))
-    locations_missing = "NO" if location_header or location_body else "INVALID"
-
-    # Dates
-    clean_text = text.replace("\n", " ").replace('"', "")
-    date_matches = DATE_PATTERN.findall(clean_text)
-
-    valid_dates = []
-    for d in date_matches:
-        if not is_valid_date_candidate(d):
-            continue
-        dt = normalize_date(d)
-        if dt:
-            valid_dates.append(dt)
-
-    # Sort dates ascending
-    valid_dates.sort()
-
-    # Assign dates
-    if len(valid_dates) >= 2:
-        application_date = valid_dates[0].strftime("%-d-%b-%y")
-        patent_date = valid_dates[-1].strftime("%-d-%b-%y")
-        date_missing = "NO"
-    elif len(valid_dates) == 1:
-        application_date = valid_dates[0].strftime("%-d-%b-%y")
-        patent_date = ""
-        date_missing = "INVALID"
+    )
+    if body_match:
+        name_body = body_match.group(1).title()
+        location_body = f"{body_match.group(2).title()}, in the county of {body_match.group(3).title()} and State of {body_match.group(4).title()}"
     else:
-        application_date = ""
-        patent_date = ""
-        date_missing = "INVALID"
+        name_body = name_header
+        location_body = location_header
 
-    all_dates = ", ".join([d.strftime("%-d-%b-%y") for d in valid_dates])
-
-    return {
-        "name_header": name_header,
-        "name_body": name_body,
-        "names_missing": names_missing,
-        "location_header": location_header,
-        "location_body": location_body,
-        "locations_missing": locations_missing,
-        "application_date": application_date,
-        "patent_date": patent_date,
-        "all_dates": all_dates,
-        "date_missing": date_missing,
-    }
+    return name_header, name_body, location_header, location_body
 
 
-# ----- Get first OCR text file -----
 def get_first_text_file(folder_path):
     txt_files = [f for f in os.listdir(folder_path) if f.endswith("_text.txt")]
     if not txt_files:
@@ -129,9 +134,9 @@ def get_first_text_file(folder_path):
     return txt_files_sorted[0]
 
 
-# ----- Main loop -----
 def run_metadata_extraction():
     rows = []
+
     for folder in sorted(os.listdir(OCR_ROOT)):
         folder_path = os.path.join(OCR_ROOT, folder)
         if not os.path.isdir(folder_path):
@@ -150,27 +155,49 @@ def run_metadata_extraction():
         ) as f:
             text = f.read()
 
-        meta = extract_metadata(text)
-        rows.append({"folder": folder, "first_page": first_page, **meta})
+        header, body, header_lines = split_header_body(text)
+        name_header, name_body, location_header, location_body = (
+            extract_names_and_locations(header_lines, body)
+        )
+        date = extract_date(text)
+
+        names_missing = "YES" if not name_header and not name_body else "NO"
+        locations_missing = "YES" if not location_header and not location_body else "NO"
+
+        rows.append(
+            {
+                "folder": folder,
+                "first_page": first_page,
+                "name_header": name_header,
+                "name_body": name_body,
+                "names_missing": names_missing,
+                "location_header": location_header,
+                "location_body": location_body,
+                "locations_missing": locations_missing,
+                "date": date,
+                "date_missing": "YES" if not date else "NO",
+            }
+        )
+
         print(f"[OK] {folder} → {first_page}")
 
     # Write CSV
-    fieldnames = [
-        "folder",
-        "first_page",
-        "name_header",
-        "name_body",
-        "names_missing",
-        "location_header",
-        "location_body",
-        "locations_missing",
-        "application_date",
-        "patent_date",
-        "all_dates",
-        "date_missing",
-    ]
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "folder",
+                "first_page",
+                "name_header",
+                "name_body",
+                "names_missing",
+                "location_header",
+                "location_body",
+                "locations_missing",
+                "date",
+                "date_missing",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
 
