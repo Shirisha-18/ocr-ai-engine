@@ -1,153 +1,120 @@
 import re
 import os
-import csv
+from dateutil import parser
 from datetime import datetime
+import glob
 
-OCR_ROOT = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\random_sample"
-OUTPUT_FILE = rf"C:\Users\shiri\Dropbox\ocr_patents\info\metadata_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-
-def split_header_body(text, max_header_lines=12):
-    lines = text.split("\n")
-    header = "\n".join(lines[:max_header_lines])
-    body = "\n".join(lines[max_header_lines:])
-    return header, body
-
-
-# ----- REGEX patterns -----
-
-TITLE_PATTERN = re.compile(
-    r"(United States Patent.*?)\n([A-Z0-9 ,.'\-:()]+)", re.IGNORECASE | re.DOTALL
+# -------------------------------
+# Date extraction pattern
+# -------------------------------
+MONTHS = (
+    "Jan(?:uary)?",
+    "Feb(?:ruary)?",
+    "Mar(?:ch)?",
+    "Apr(?:il)?",
+    "May",
+    "Jun(?:e)?",
+    "Jul(?:y)?",
+    "Aug(?:ust)?",
+    "Sep(?:t(?:ember)?)?",
+    "Oct(?:ober)?",
+    "Nov(?:ember)?",
+    "Dec(?:ember)?",
 )
-
-NAME_PATTERN = re.compile(r"\b([A-Z][A-Za-z'\-]+(?: [A-Z][A-Za-z'\-]+)*)\b")
-
-LOCATION_PATTERN = re.compile(
-    r"\b([A-Za-z .'-]+,\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY))\b"
-)
+MONTH_REGEX = "|".join(MONTHS)
 
 DATE_PATTERN = re.compile(
-    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2}, \d{4}\b",
-    re.IGNORECASE,
+    rf'\b(?:"?)(?:\d{{1,2}}\s+(?:{MONTH_REGEX})|(?:{MONTH_REGEX})\.?\s*\d{{1,2}}),?\s*\d{{2,4}}(?:")?\b',
+    flags=re.IGNORECASE,
 )
 
 
+# -------------------------------
+# Utility functions
+# -------------------------------
+def is_valid_date_candidate(date_str):
+    invalid_keywords = ["DECEASED", "of", "1,071", "No."]
+    date_str_clean = date_str.replace("\n", " ").replace('"', "")
+    if any(word.upper() in date_str_clean.upper() for word in invalid_keywords):
+        return False
+    return True
+
+
+def normalize_date(date_str):
+    date_str_clean = date_str.replace("\n", " ").replace('"', "").strip()
+    try:
+        dt = parser.parse(date_str_clean, fuzzy=True)
+        return dt
+    except (ValueError, OverflowError):
+        return None
+
+
+# -------------------------------
+# Metadata extraction
+# -------------------------------
 def extract_metadata(text):
-    header, body = split_header_body(text)
+    # Dates
+    clean_text = text.replace("\n", " ").replace('"', "")
+    date_matches = DATE_PATTERN.findall(clean_text)
 
-    # ----- Title -----
-    title_header_match = TITLE_PATTERN.search(header)
-    title_header = title_header_match.group(2).strip() if title_header_match else ""
+    valid_dates = []
+    for d in date_matches:
+        if not is_valid_date_candidate(d):
+            continue
+        dt = normalize_date(d)
+        if dt:
+            valid_dates.append(dt)
 
-    title_body_match = TITLE_PATTERN.search(body)
-    title_body = title_body_match.group(2).strip() if title_body_match else ""
+    valid_dates.sort()
 
-    # final title
-    title = title_header if title_header else title_body
+    # OS-aware formatting
+    day_format = "%#d" if os.name == "nt" else "%-d"
+    date_format = f"{day_format}-%b-%y"
 
-    # ----- Names -----
-    name_header = ", ".join(sorted(set(NAME_PATTERN.findall(header))))
-    name_body = ", ".join(sorted(set(NAME_PATTERN.findall(body))))
-
-    # ----- Locations -----
-    location_header = ", ".join(sorted(set(LOCATION_PATTERN.findall(header))))
-    location_body = ", ".join(sorted(set(LOCATION_PATTERN.findall(body))))
-
-    # ----- Date -----
-    date_header = DATE_PATTERN.findall(header)
-    date_body = DATE_PATTERN.findall(body)
-
-    if date_header:
-        date = date_header[0]
-    elif date_body:
-        date = date_body[0]
+    if len(valid_dates) >= 2:
+        application_date = valid_dates[0].strftime(date_format)
+        patent_date = valid_dates[-1].strftime(date_format)
+        date_missing = "NO"
+    elif len(valid_dates) == 1:
+        application_date = valid_dates[0].strftime(date_format)
+        patent_date = ""
+        date_missing = "INVALID"
     else:
-        date = ""
-
-    # ----- Missing Flags -----
-    title_missing = "YES" if title.strip() == "" else "NO"
-    names_missing = "YES" if name_header == "" and name_body == "" else "NO"
-    locations_missing = "YES" if location_header == "" and location_body == "" else "NO"
-    date_missing = "YES" if date == "" else "NO"
+        application_date = ""
+        patent_date = ""
+        date_missing = "INVALID"
 
     return {
-        "title": title,
-        "name_header": name_header,
-        "name_body": name_body,
-        "location_header": location_header,
-        "location_body": location_body,
-        "date": date,
-        "title_missing": title_missing,
-        "names_missing": names_missing,
-        "locations_missing": locations_missing,
+        "application_date": application_date,
+        "patent_date": patent_date,
         "date_missing": date_missing,
+        "all_dates": ", ".join([d.strftime(date_format) for d in valid_dates]),
     }
 
 
-def get_first_text_file(folder_path):
-    txt_files = [f for f in os.listdir(folder_path) if f.endswith("_text.txt")]
-    if not txt_files:
-        return None
+# -------------------------------
+# Main runner
+# -------------------------------
+def run_metadata_extraction(folder_path):
+    text_files = glob.glob(os.path.join(folder_path, "*.txt"))
+    if not text_files:
+        print("[ERROR] No text files found in folder:", folder_path)
+        return
 
-    # Sort numerically e.g., 00000002_text.txt
-    txt_files_sorted = sorted(
-        txt_files, key=lambda x: int(re.findall(r"(\d+)_text\.txt", x)[0])
-    )
-    return txt_files_sorted[0]
-
-
-def run_metadata_extraction():
-    rows = []
-
-    for folder in sorted(os.listdir(OCR_ROOT)):
-        folder_path = os.path.join(OCR_ROOT, folder)
-
-        if not os.path.isdir(folder_path):
-            continue
-
-        first_page = get_first_text_file(folder_path)
-        if not first_page:
-            print(f"[NO OCR FILE] {folder}")
-            continue
-
-        with open(
-            os.path.join(folder_path, first_page),
-            "r",
-            encoding="utf-8",
-            errors="ignore",
-        ) as f:
+    for file_path in text_files:
+        with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
 
         meta = extract_metadata(text)
-
-        rows.append({"folder": folder, "first_page": first_page, **meta})
-
-        print(f"[OK] {folder} → {first_page}")
-
-    # ----- Write CSV -----
-    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "folder",
-                "first_page",
-                "title",
-                "title_missing",
-                "name_header",
-                "name_body",
-                "names_missing",
-                "location_header",
-                "location_body",
-                "locations_missing",
-                "date",
-                "date_missing",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(f"\nSaved metadata to:\n{OUTPUT_FILE}\n")
+        print(f"[OK] {os.path.basename(file_path)}")
+        print(meta)
 
 
+# -------------------------------
+# Entry point
+# -------------------------------
 if __name__ == "__main__":
-    run_metadata_extraction()
+    folder = (
+        "C:/Users/shiri/OneDrive/Documents/Python/llm-projects/ocr-ai-engine/text_files"
+    )
+    run_metadata_extraction(folder)
