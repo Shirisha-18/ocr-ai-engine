@@ -63,7 +63,7 @@ def normalize_date(raw_date):
     for fmt in date_formats:
         try:
             dt = datetime.strptime(raw_date, fmt)
-            return dt.strftime("%m/%d/%Y")
+            return dt.strftime("%m/%d/%Y")  # MM/DD/YYYY
         except:
             continue
     return raw_date
@@ -77,17 +77,13 @@ def split_header_body(text, max_header_lines=12):
 
 
 def extract_names_and_locations(header_lines, body_text):
-    # --- Header: capture multiple names ---
     name_header, location_header = "", ""
     for line in header_lines:
         match = re.search(
-            r"((?:[A-Z][A-Za-z\s\.\-']+(?:,?\s?(?:and\s)?)+)+), OF ([A-Z][A-Z\s\.\-']+),? ([A-Z]{2,})?",
-            line,
+            r"([A-Z][A-Za-z\s\.\-']+), OF ([A-Z][A-Z\s\.\-']+),? ([A-Z]{2,})?", line
         )
         if match:
-            raw_names = match.group(1)
-            name_list = [n.strip().title() for n in re.split(r",| and ", raw_names)]
-            name_header = ", ".join(name_list)
+            name_header = match.group(1).title()
             city_header = match.group(2).title()
             state_header = match.group(3).upper() if match.group(3) else ""
             location_header = (
@@ -95,22 +91,20 @@ def extract_names_and_locations(header_lines, body_text):
             )
             break
 
-    # --- Body: capture multiple names and county/city/state ---
-    name_body, location_body = name_header, location_header
     body_match = re.search(
-        r"I,\s*((?:[A-Z][A-Za-z\.\-']+\s?)+(?:,?\s?(?:and\s)?(?:[A-Z][A-Za-z\.\-']+\s?)+)*)"
-        r", (?:a resident of |citizen of |residing at )?(.+?), in the county of (.+?) and State of (.+?)",
+        r"I, ([A-Z][A-Za-z\s\.\-']+), (?:a resident of |citizen of |residing at )?(.+?), in the county of (.+?) and State of (.+?)",
         body_text,
         re.IGNORECASE | re.DOTALL,
     )
     if body_match:
-        raw_names = body_match.group(1)
-        name_list = [n.strip().title() for n in re.split(r",| and ", raw_names)]
-        name_body = ", ".join(name_list)
+        name_body = body_match.group(1).title()
         city_body = body_match.group(2).strip().title()
         county_body = body_match.group(3).strip().title()
         state_body = body_match.group(4).strip().title()
         location_body = f"{county_body} County, {city_body}, {state_body}"
+    else:
+        name_body = name_header
+        location_body = location_header
 
     return name_header, name_body, location_header, location_body
 
@@ -133,6 +127,7 @@ def get_first_text_file(folder_path):
     return txt_files_sorted[0]
 
 
+# --- New function to validate location ---
 def is_location_real(location_text):
     parts = [p.strip() for p in location_text.split(",")]
     if len(parts) >= 2:
