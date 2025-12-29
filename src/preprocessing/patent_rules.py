@@ -94,6 +94,14 @@ if __name__ == "__main__":
     import json
 
     silver = generate_silver_labels()
-    with open("../output/silver_labels.json", "w", encoding="utf-8") as f:
+
+    # Ensure output folder exists
+    output_folder = os.path.join(os.path.dirname(__file__), "..", "output")
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Save silver labels
+    silver_file = os.path.join(output_folder, "silver_labels.json")
+    with open(silver_file, "w", encoding="utf-8") as f:
         json.dump(silver, f, indent=2)
-    print("Silver labels saved!")
+
+    print(f"Silver labels saved at {silver_file}!")
