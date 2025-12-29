@@ -4,3 +4,4 @@ google-cloud-vision
 tqdm
 geopy
 geonamescache
+spacy
