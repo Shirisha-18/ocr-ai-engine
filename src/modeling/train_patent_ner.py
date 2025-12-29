@@ -1,107 +1,85 @@
-# train_patent_ner.py (fixed for overlapping entities)
-import re
 import spacy
 from spacy.tokens import DocBin
-from spacy.training.example import Example
+import json
 from pathlib import Path
 
-CUSTOM_LABELS = [
+LABELS = [
     "PATENT_NUMBER",
     "SERIAL_NUMBER",
     "APPLICATION_DATE",
     "PATENT_DATE",
-    "PATENT_TITLE",
     "INVENTOR",
     "ASSIGNEE",
-    "APPLICANT",
+    "PATENT_TITLE",
 ]
 
 nlp = spacy.blank("en")
 ner = nlp.add_pipe("ner")
-for label in CUSTOM_LABELS:
+for label in LABELS:
     ner.add_label(label)
 
-
-def safe_entities(text, entities):
-    # Resolve overlapping spans: keep the longest span
-    entities = sorted(entities, key=lambda x: (x[0], -x[1]))  # start asc, end desc
-    final_entities = []
-    for ent in entities:
-        if not final_entities:
-            final_entities.append(ent)
-            continue
-        last = final_entities[-1]
-        # If overlap
-        if ent[0] < last[1]:
-            # Keep longer span
-            if (ent[1] - ent[0]) > (last[1] - last[0]):
-                final_entities[-1] = ent
-        else:
-            final_entities.append(ent)
-    return final_entities
+# Load silver labels
+with open("../output/silver_labels.json", "r", encoding="utf-8") as f:
+    silver_data = json.load(f)
 
 
-def generate_training_example(text):
+def create_entities(text, item):
     entities = []
 
-    # Patent numbers
-    for m in re.finditer(
-        r"(?:Patent No\.?|No\.|Appl\. No\.|Serial No\.):?\s*([\d,]+)",
-        text,
-        re.IGNORECASE,
-    ):
-        entities.append((m.start(1), m.end(1), "PATENT_NUMBER"))
+    # helper to add spans
+    def add_entity(start, end, label):
+        if start < end:
+            entities.append((start, end, label))
 
-    # Dates
-    for m in re.finditer(
-        r"(?:Patented|Issued|Specification dated|Mon\.?\s+\d{1,2},\s+\d{4}|Application filed|Filed):?\s*(Mon\.?\s+\d{1,2},\s+\d{4})?",
-        text,
-    ):
-        label = (
-            "PATENT_DATE"
-            if "Patent" in m.group() or "Specification" in m.group()
-            else "APPLICATION_DATE"
-        )
-        entities.append((m.start(), m.end(), label))
+    for label, key in [
+        ("PATENT_NUMBER", "patent_number"),
+        ("SERIAL_NUMBER", "serial_number"),
+        ("APPLICATION_DATE", "application_date"),
+        ("PATENT_DATE", "patent_date"),
+        ("PATENT_TITLE", "title"),
+    ]:
+        if item[key]:
+            start = text.find(item[key])
+            if start != -1:
+                add_entity(start, start + len(item[key]), label)
+    # Inventors
+    for inv in item["inventors"]:
+        start = text.find(inv)
+        if start != -1:
+            add_entity(start, start + len(inv), "INVENTOR")
+    # Assignees
+    for ass in item["assignees"]:
+        start = text.find(ass)
+        if start != -1:
+            add_entity(start, start + len(ass), "ASSIGNEE")
+    return entities
 
-    # Inventor / Applicant / Assignee
-    for match in re.finditer(
-        r"(Inventor|Applicant|Assignee|Assignors?)[:\.]?\s*([A-Za-z.,\s]+)", text
-    ):
-        start, end = match.start(2), match.end(2)
-        role = match.group(1).upper()
-        if "INVENTOR" in role:
-            entities.append((start, end, "INVENTOR"))
-        elif "APPLICANT" in role:
-            entities.append((start, end, "APPLICANT"))
-        elif "ASSIGNEE" in role or "ASSIGNORS" in role:
-            entities.append((start, end, "ASSIGNEE"))
-
-    # Patent title heuristic
-    for line in text.split("\n"):
-        line_strip = line.strip()
-        if len(line_strip) > 3 and line_strip.isupper() and "PATENT" not in line_strip:
-            start = text.index(line_strip)
-            entities.append((start, start + len(line_strip), "PATENT_TITLE"))
-            break
-
-    entities = safe_entities(text, entities)
-    return {"text": text, "entities": entities}
-
-
-# Example training texts
-train_texts = [
-    "HEADER\nName, City, State\nTITLE\nSpecification forming part of Letters Patent No. 1234567, dated January 1, 1900\nApplication filed January 1, 1899\nInventor: John Doe\nAssignee: Company X",
-    "HEADER\nNo. 7654321 Patented March 3, 1920\nTitle\nApplicant: Jane Smith\nFiled: Feb. 1, 1919\n",
-]
 
 db = DocBin()
-for text in train_texts:
-    example_data = generate_training_example(text)
-    doc = nlp.make_doc(example_data["text"])
-    if example_data["entities"]:
-        example = Example.from_dict(doc, {"entities": example_data["entities"]})
+for item in silver_data:
+    text = item["header"]
+    entities = create_entities(text, item)
+    if entities:
+        doc = nlp.make_doc(text)
+        doc_bin_example = {"entities": entities}
+        from spacy.training.example import Example
+
+        example = Example.from_dict(doc, doc_bin_example)
         db.add(example.reference)
 
 Path("./train.spacy").write_bytes(db.to_bytes())
 print("Training data saved to train.spacy")
+
+# Training loop
+from spacy.util import minibatch, compounding
+
+nlp.begin_training()
+for i in range(30):
+    losses = {}
+    batches = minibatch(list(db.get_docs(nlp.vocab)), size=compounding(4.0, 32.0, 1.5))
+    for batch in batches:
+        nlp.update(batch, sgd=nlp.optimizer, losses=losses)
+    print(f"Epoch {i + 1}, Losses: {losses}")
+
+nlp.to_disk("./patent_ner")
+print("Custom SpaCy NER model saved at ./patent_ner")
