@@ -1,11 +1,10 @@
-# train_patent_ner.py
+# train_patent_ner.py (fixed for overlapping entities)
 import re
 import spacy
 from spacy.tokens import DocBin
 from spacy.training.example import Example
 from pathlib import Path
 
-# Custom labels
 CUSTOM_LABELS = [
     "PATENT_NUMBER",
     "SERIAL_NUMBER",
@@ -17,25 +16,29 @@ CUSTOM_LABELS = [
     "APPLICANT",
 ]
 
-# Blank English model
 nlp = spacy.blank("en")
 ner = nlp.add_pipe("ner")
 for label in CUSTOM_LABELS:
     ner.add_label(label)
 
 
-# Function to safely map character offsets to spaCy tokens
 def safe_entities(text, entities):
-    doc = nlp.make_doc(text)
-    valid_entities = []
-    for start, end, label in entities:
-        try:
-            span = doc.char_span(start, end, label=label, alignment_mode="contract")
-            if span is not None:
-                valid_entities.append((span.start_char, span.end_char, span.label_))
-        except:
-            pass
-    return valid_entities
+    # Resolve overlapping spans: keep the longest span
+    entities = sorted(entities, key=lambda x: (x[0], -x[1]))  # start asc, end desc
+    final_entities = []
+    for ent in entities:
+        if not final_entities:
+            final_entities.append(ent)
+            continue
+        last = final_entities[-1]
+        # If overlap
+        if ent[0] < last[1]:
+            # Keep longer span
+            if (ent[1] - ent[0]) > (last[1] - last[0]):
+                final_entities[-1] = ent
+        else:
+            final_entities.append(ent)
+    return final_entities
 
 
 def generate_training_example(text):
@@ -82,18 +85,16 @@ def generate_training_example(text):
             entities.append((start, start + len(line_strip), "PATENT_TITLE"))
             break
 
-    # Align entities safely
     entities = safe_entities(text, entities)
     return {"text": text, "entities": entities}
 
 
-# Example training texts (replace with your OCR header dataset)
+# Example training texts
 train_texts = [
     "HEADER\nName, City, State\nTITLE\nSpecification forming part of Letters Patent No. 1234567, dated January 1, 1900\nApplication filed January 1, 1899\nInventor: John Doe\nAssignee: Company X",
     "HEADER\nNo. 7654321 Patented March 3, 1920\nTitle\nApplicant: Jane Smith\nFiled: Feb. 1, 1919\n",
 ]
 
-# Convert to DocBin
 db = DocBin()
 for text in train_texts:
     example_data = generate_training_example(text)
