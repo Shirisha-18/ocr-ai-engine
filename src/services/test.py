@@ -56,36 +56,56 @@ def extract_patent_dates(text):
     text = normalize_text(text)
     lines = text.splitlines()
 
+    # -------------------------------------------
+    # SMART MULTILINE MERGE (3-line window)
+    # -------------------------------------------
     combined_lines = []
-    for i, line in enumerate(lines):
-        line = line.strip()
+
+    for i in range(len(lines)):
+        line = lines[i].strip()
         if not line:
             continue
 
         combined_lines.append(line)
 
+        # Merge with next line
         if i + 1 < len(lines):
             combined_lines.append(line + " " + lines[i + 1].strip())
+
+        # Merge with next 2 lines
+        if i + 2 < len(lines):
+            combined_lines.append(
+                line + " " + lines[i + 1].strip() + " " + lines[i + 2].strip()
+            )
 
     patent_date = ""
     filed_date = ""
 
+    # -------------------------------------------
+    # STRONG DATE PATTERNS
+    # -------------------------------------------
+    flexible_date = r"([A-Za-z]{3,9}\.?\s+\d{1,2}[,\.]?\s+\d{4})"
+
     patent_patterns = [
-        r"patented\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
-        r"letters patent.*?dated\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
-        r"dated\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        rf"patent\w*\s+{flexible_date}",
+        rf"patent\w*.*?{flexible_date}",
+        rf"letters patent.*?dated\s+{flexible_date}",
+        rf"dated\s+{flexible_date}",
+        rf"\(45\).*?{flexible_date}",
+        rf"\[45\].*?{flexible_date}",
     ]
 
     filed_patterns = [
-        r"application.*?filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
-        r"application filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
-        r"filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
-        r"application\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        rf"application.*?file\w*\s+{flexible_date}",
+        rf"file\w*\s+{flexible_date}",
+        rf"\(22\).*?{flexible_date}",
+        rf"\[22\].*?{flexible_date}",
+        rf"application\s+{flexible_date}",
     ]
 
-    # =================================================
-    # ORIGINAL WORKING LOGIC (UNCHANGED)
-    # =================================================
+    # -------------------------------------------
+    # PRIMARY EXTRACTION
+    # -------------------------------------------
     for line in combined_lines:
         if not patent_date:
             for pat in patent_patterns:
@@ -108,13 +128,11 @@ def extract_patent_dates(text):
         if patent_date and filed_date:
             break
 
-    # =================================================
-    # GENERIC FUZZY RESCUE LAYER (ONLY IF MISSING)
-    # =================================================
+    # -------------------------------------------
+    # FUZZY RESCUE (Only if still missing)
+    # -------------------------------------------
     if not patent_date or not filed_date:
-        flexible_date = r"([A-Za-z]{3,9}\.?\s+\d{1,2}[,\.]?\s+\d{4})"
-
-        for i, line in enumerate(lines):
+        for line in combined_lines:
             m = re.search(flexible_date, line, re.I)
             if not m:
                 continue
@@ -124,30 +142,31 @@ def extract_patent_dates(text):
                 continue
 
             formatted = dt.strftime("%m/%d/%Y")
-
             lower_line = line.lower()
 
-            # --- Filed detection (fuzzy) ---
+            # Filed detection
             if not filed_date:
                 if (
                     fuzzy_contains(lower_line, "filed")
                     or fuzzy_contains(lower_line, "application")
                     or "[22]" in line
+                    or "(22)" in line
                 ):
                     filed_date = formatted
                     continue
 
-            # --- Patent detection (fuzzy) ---
+            # Patent detection
             if not patent_date:
                 if (
                     fuzzy_contains(lower_line, "patented")
                     or fuzzy_contains(lower_line, "issued")
                     or "[45]" in line
+                    or "(45)" in line
                 ):
                     patent_date = formatted
                     continue
 
-            # --- Positional fallback ---
+            # Last resort positional logic
             if not filed_date:
                 filed_date = formatted
             elif not patent_date:
@@ -156,9 +175,9 @@ def extract_patent_dates(text):
             if patent_date and filed_date:
                 break
 
-    # =================================================
+    # -------------------------------------------
     # SANITY CHECK
-    # =================================================
+    # -------------------------------------------
     if patent_date and filed_date:
         if parse(filed_date) > parse(patent_date):
             filed_date = ""
