@@ -1,80 +1,194 @@
 import os
 import csv
+import re
+import unicodedata
 from datetime import datetime
-import spacy
-from date_spacy import find_dates
+
+from dateparser import parse
 
 # =================================================
 # CONFIG
 # =================================================
+
 OCR_ROOT = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\random_sample"
-OUTPUT_FILE = rf"C:\Users\shiri\Dropbox\ocr_patents\info\patent_dates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+REFERENCE_CSV = r"C:\Users\shiri\Dropbox\ocr_patents\patents_fyear_iyear.csv"
+OUTPUT_CSV = rf"C:\Users\shiri\Dropbox\ocr_patents\info\patent_dates_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 # =================================================
-# spaCy pipeline (NO ML, date-only)
+# HELPERS
 # =================================================
-nlp = spacy.blank("en")
-nlp.add_pipe("find_dates")
 
 
-# =================================================
-# Helpers
-# =================================================
+def normalize_patnum(patnum):
+    """Normalize patent numbers ONLY for matching"""
+    return patnum.lstrip("0")
+
+
 def get_first_text_file(folder_path):
     txt_files = [f for f in os.listdir(folder_path) if f.endswith("_text.txt")]
-    if not txt_files:
-        return None
-    return sorted(txt_files)[0]
+    return sorted(txt_files)[0] if txt_files else None
 
 
-def extract_dates_spacy(text):
-    """
-    Extract patent date and application/filed date using spaCy context.
-    Returns:
-        patent_date (MM/DD/YYYY or "")
-        filed_date  (MM/DD/YYYY or "")
-    """
-    doc = nlp(text)
+def split_date(date_str):
+    if not date_str:
+        return "", "", ""
 
-    patent_date = None
-    filed_date = None
+    dt = datetime.strptime(date_str, "%m/%d/%Y")
+    return str(dt.year), str(dt.month), str(dt.day)
 
-    for ent in doc.ents:
-        if ent.label_ != "DATE" or not ent._.date:
+
+def normalize_text(text):
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
+
+
+def extract_patent_dates(text):
+    text = normalize_text(text)
+    lines = text.splitlines()
+
+    combined_lines = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
             continue
 
-        sent_text = ent.sent.text.lower()
-        parsed_date = ent._.date.strftime("%m/%d/%Y")
+        combined_lines.append(line)
 
-        # Patent date anchors (1832 → present)
-        if patent_date is None and any(
-            kw in sent_text for kw in ["dated", "patented", "letters patent"]
+        if i + 1 < len(lines):
+            combined_lines.append(line + " " + lines[i + 1].strip())
+
+    patent_date = ""
+    filed_date = ""
+
+    patent_patterns = [
+        r"patented\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"letters patent.*?dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+    ]
+
+    filed_patterns = [
+        r"application.*?filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"application filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"application\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+    ]
+
+    for line in combined_lines:
+        if not patent_date:
+            for pat in patent_patterns:
+                m = re.search(pat, line, re.I)
+                if m:
+                    dt = parse(m.group(1))
+                    if dt:
+                        patent_date = dt.strftime("%m/%d/%Y")
+                        break
+
+        if not filed_date:
+            for pat in filed_patterns:
+                m = re.search(pat, line, re.I)
+                if m:
+                    dt = parse(m.group(1))
+                    if dt:
+                        filed_date = dt.strftime("%m/%d/%Y")
+                        break
+
+        if patent_date and filed_date:
+            break
+
+    # Sanity check
+    if patent_date and filed_date:
+        if parse(filed_date) > parse(patent_date):
+            filed_date = ""
+
+    return patent_date, filed_date
+
+
+def load_csv_dict(path):
+    """Reference CSV keyed by normalized patent number"""
+    data = {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            key = normalize_patnum(row["patnum"])
+            data[key] = row
+
+    return data
+
+
+def compare_dates_with_flags(extracted_row, reference_row):
+    # -------------------------
+    # Missing patent entirely
+    # -------------------------
+    if not reference_row:
+        return "Missing", "Missing", "Missing in Reference"
+
+    # -------------------------
+    # PATENT (ISSUE) DATE
+    # -------------------------
+    if not (
+        reference_row.get("iyear")
+        and reference_row.get("imonth")
+        and reference_row.get("iday")
+    ):
+        patent_status = "Missing"
+    else:
+        patent_status = "No"
+        if (
+            extracted_row["iyear"] != reference_row["iyear"]
+            or extracted_row["imonth"] != reference_row["imonth"]
+            or extracted_row["iday"] != reference_row["iday"]
         ):
-            patent_date = parsed_date
+            patent_status = "Yes"
 
-        # Application / Filed date anchors (appear later historically)
-        elif filed_date is None and any(
-            kw in sent_text for kw in ["application", "filed", "applied"]
+    # -------------------------
+    # FILED (APPLICATION) DATE
+    # -------------------------
+    if not (
+        reference_row.get("fyear")
+        and reference_row.get("fmonth")
+        and reference_row.get("fday")
+    ):
+        filed_status = "Missing"
+    else:
+        filed_status = "No"
+        if (
+            extracted_row["fyear"] != reference_row["fyear"]
+            or extracted_row["fmonth"] != reference_row["fmonth"]
+            or extracted_row["fday"] != reference_row["fday"]
         ):
-            filed_date = parsed_date
+            filed_status = "Yes"
 
-    return patent_date or "", filed_date or ""
+    # -------------------------
+    # OVERALL FLAG
+    # -------------------------
+    if "Yes" in (patent_status, filed_status):
+        flag = "Wrong"
+    elif "Missing" in (patent_status, filed_status):
+        flag = "Missing"
+    else:
+        flag = "Correct"
+
+    return patent_status, filed_status, flag
 
 
 # =================================================
-# Main runner
+# MAIN
 # =================================================
-def run_date_extraction():
-    rows = []
+
+
+def run():
+    extracted_rows = []
 
     for folder in sorted(os.listdir(OCR_ROOT)):
         folder_path = os.path.join(OCR_ROOT, folder)
+
         if not os.path.isdir(folder_path):
             continue
 
         first_page = get_first_text_file(folder_path)
         if not first_page:
-            print(f"[NO OCR FILE] {folder}")
             continue
 
         with open(
@@ -85,42 +199,54 @@ def run_date_extraction():
         ) as f:
             text = f.read()
 
-        patent_date, filed_date = extract_dates_spacy(text)
+        patent_date, filed_date = extract_patent_dates(text)
+        pyear, pmonth, pday = split_date(patent_date)
+        fyear, fmonth, fday = split_date(filed_date)
 
-        rows.append(
+        extracted_rows.append(
             {
-                "folder_or_patent_number": folder,
-                "patent_date": patent_date,
-                "filed_date": filed_date,
+                "patnum": folder,
+                "iyear": pyear,
+                "imonth": pmonth,
+                "iday": pday,
+                "fyear": fyear,
+                "fmonth": fmonth,
+                "fday": fday,
             }
         )
 
         print(
-            f"[OK] {folder} → "
+            f"[OK] {folder} | "
             f"Patent: {patent_date or 'N/A'} | "
             f"Filed: {filed_date or 'N/A'}"
         )
 
-    # =================================================
-    # Save CSV
-    # =================================================
-    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "patent_number",
-                "patent_date",
-                "filed_date",
-            ],
+    reference_dict = load_csv_dict(REFERENCE_CSV)
+
+    final_rows = []
+    for row in extracted_rows:
+        ref_row = reference_dict.get(normalize_patnum(row["patnum"]))
+        pw, fw, flag = compare_dates_with_flags(row, ref_row)
+        final_rows.append(
+            {
+                **row,
+                "patent_wrong": pw,
+                "filed_wrong": fw,
+                "flag": flag,
+            }
         )
+
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=final_rows[0].keys())
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(final_rows)
 
-    print(f"\nSaved CSV to:\n{OUTPUT_FILE}\n")
+    print(f"\n✅ Done! Comparison CSV saved to:\n{OUTPUT_CSV}")
 
 
 # =================================================
-# Entry point
+# ENTRY POINT
 # =================================================
+
 if __name__ == "__main__":
-    run_date_extraction()
+    run()
