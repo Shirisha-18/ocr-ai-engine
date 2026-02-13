@@ -3,7 +3,7 @@ import csv
 import re
 import unicodedata
 from datetime import datetime
-
+from difflib import SequenceMatcher
 from dateparser import parse
 
 # =================================================
@@ -14,13 +14,14 @@ OCR_ROOT = r"C:\Users\shiri\Dropbox\ocr_patents\ocr_patents\random_sample"
 REFERENCE_CSV = r"C:\Users\shiri\Dropbox\ocr_patents\patents_fyear_iyear.csv"
 OUTPUT_CSV = rf"C:\Users\shiri\Dropbox\ocr_patents\info\patent_dates_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
+FILING_START_DATE = datetime(1873, 4, 1)
+
 # =================================================
 # HELPERS
 # =================================================
 
 
 def normalize_patnum(patnum):
-    """Normalize patent numbers ONLY for matching"""
     return patnum.lstrip("0")
 
 
@@ -32,7 +33,6 @@ def get_first_text_file(folder_path):
 def split_date(date_str):
     if not date_str:
         return "", "", ""
-
     dt = datetime.strptime(date_str, "%m/%d/%Y")
     return str(dt.year), str(dt.month), str(dt.day)
 
@@ -43,58 +43,93 @@ def normalize_text(text):
     )
 
 
-def extract_patent_dates(text):
+def fuzzy_contains(line, target, threshold=0.72):
+    words = re.findall(r"[A-Za-z]{3,}", line.lower())
+    for word in words:
+        if SequenceMatcher(None, word, target).ratio() >= threshold:
+            return True
+    return False
+
+
+def extract_date_from_line(line):
+    pattern = r"([A-Za-z]{3,9}\.?\s+\d{1,2}[,\.]?\s+\d{4})"
+    m = re.search(pattern, line, re.I)
+    if m:
+        dt = parse(m.group(1))
+        if dt:
+            return dt.strftime("%m/%d/%Y")
+    return ""
+
+
+# =================================================
+# DATE EXTRACTION
+# =================================================
+
+
+def extract_patent_dates(text, patnum):
     text = normalize_text(text)
     lines = text.splitlines()
-
-    combined_lines = []
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-
-        combined_lines.append(line)
-
-        if i + 1 < len(lines):
-            combined_lines.append(line + " " + lines[i + 1].strip())
 
     patent_date = ""
     filed_date = ""
 
-    patent_patterns = [
-        r"patented\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"letters patent.*?dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-    ]
+    try:
+        patnum_int = int(normalize_patnum(patnum))
+    except:
+        patnum_int = 0
 
-    filed_patterns = [
-        r"application.*?filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"application filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"application\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-    ]
+    # =================================================
+    # RANGE-SPECIFIC LAYOUT RULES
+    # =================================================
 
-    for line in combined_lines:
-        if not patent_date:
-            for pat in patent_patterns:
-                m = re.search(pat, line, re.I)
-                if m:
-                    dt = parse(m.group(1))
-                    if dt:
-                        patent_date = dt.strftime("%m/%d/%Y")
-                        break
+    # -------- 3543618–3544118 --------
+    if 3543618 <= patnum_int <= 3544118:
+        for line in lines:
+            if "(22" in line or "[22" in line:
+                filed_date = extract_date_from_line(line)
+            if "(45" in line or "[45" in line:
+                patent_date = extract_date_from_line(line)
 
-        if not filed_date:
-            for pat in filed_patterns:
-                m = re.search(pat, line, re.I)
-                if m:
-                    dt = parse(m.group(1))
-                    if dt:
-                        filed_date = dt.strftime("%m/%d/%Y")
-                        break
+    # -------- 3558791–3634888 --------
+    elif 3558791 <= patnum_int <= 3634888:
+        for line in lines:
+            if "22 Filed" in line or "(22)" in line:
+                filed_date = extract_date_from_line(line)
+            if "45 Patented" in line or "(45)" in line:
+                patent_date = extract_date_from_line(line)
 
-        if patent_date and filed_date:
-            break
+    # -------- 3634889–3695820 --------
+    elif 3634889 <= patnum_int <= 3695820:
+        for line in lines:
+            if "[22]" in line:
+                filed_date = extract_date_from_line(line)
+            if "[45]" in line:
+                patent_date = extract_date_from_line(line)
+
+    # =================================================
+    # GENERIC FALLBACK
+    # =================================================
+
+    if not patent_date or not filed_date:
+        for line in lines:
+            if not filed_date:
+                if (
+                    fuzzy_contains(line, "filed")
+                    or fuzzy_contains(line, "application")
+                    or "[22]" in line
+                ):
+                    filed_date = extract_date_from_line(line)
+
+            if not patent_date:
+                if (
+                    fuzzy_contains(line, "patented")
+                    or fuzzy_contains(line, "issued")
+                    or "[45]" in line
+                ):
+                    patent_date = extract_date_from_line(line)
+
+            if patent_date and filed_date:
+                break
 
     # Sanity check
     if patent_date and filed_date:
@@ -104,69 +139,87 @@ def extract_patent_dates(text):
     return patent_date, filed_date
 
 
-def load_csv_dict(path):
-    """Reference CSV keyed by normalized patent number"""
-    data = {}
+# =================================================
+# REFERENCE LOADER
+# =================================================
 
+
+def load_csv_dict(path):
+    data = {}
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             key = normalize_patnum(row["patnum"])
             data[key] = row
-
     return data
 
 
+# =================================================
+# VALIDATION LOGIC
+# =================================================
+
+
 def compare_dates_with_flags(extracted_row, reference_row):
-    # -------------------------
-    # Missing patent entirely
-    # -------------------------
-    if not reference_row:
-        return "Missing", "Missing", "Missing in Reference"
+    patnum_int = int(normalize_patnum(extracted_row["patnum"]))
 
     # -------------------------
-    # PATENT (ISSUE) DATE
+    # Patent not in reference
     # -------------------------
+    if not reference_row:
+        return "Missing in reference", "Missing in reference", "Missing"
+
+    # =================================================
+    # EARLY PATENTS (NO FILING DATE)
+    # =================================================
+    if patnum_int < 137279:
+        if (
+            extracted_row["iyear"] == reference_row.get("iyear")
+            and extracted_row["imonth"] == reference_row.get("imonth")
+            and extracted_row["iday"] == reference_row.get("iday")
+        ):
+            return "No", "Missing in patent", "Correct"
+        else:
+            return "Yes", "Missing in patent", "Wrong"
+
+    # =================================================
+    # Missing reference dates
+    # =================================================
     if not (
         reference_row.get("iyear")
         and reference_row.get("imonth")
         and reference_row.get("iday")
     ):
-        patent_status = "Missing"
-    else:
-        patent_status = "No"
-        if (
-            extracted_row["iyear"] != reference_row["iyear"]
-            or extracted_row["imonth"] != reference_row["imonth"]
-            or extracted_row["iday"] != reference_row["iday"]
-        ):
-            patent_status = "Yes"
+        return "Missing in reference", "Missing in reference", "Missing"
 
-    # -------------------------
-    # FILED (APPLICATION) DATE
-    # -------------------------
     if not (
         reference_row.get("fyear")
         and reference_row.get("fmonth")
         and reference_row.get("fday")
     ):
-        filed_status = "Missing"
-    else:
-        filed_status = "No"
-        if (
-            extracted_row["fyear"] != reference_row["fyear"]
-            or extracted_row["fmonth"] != reference_row["fmonth"]
-            or extracted_row["fday"] != reference_row["fday"]
-        ):
-            filed_status = "Yes"
+        return "Missing in reference", "Missing in reference", "Missing"
 
-    # -------------------------
-    # OVERALL FLAG
-    # -------------------------
+    # =================================================
+    # Normal validation
+    # =================================================
+
+    patent_status = "No"
+    if (
+        extracted_row["iyear"] != reference_row["iyear"]
+        or extracted_row["imonth"] != reference_row["imonth"]
+        or extracted_row["iday"] != reference_row["iday"]
+    ):
+        patent_status = "Yes"
+
+    filed_status = "No"
+    if (
+        extracted_row["fyear"] != reference_row["fyear"]
+        or extracted_row["fmonth"] != reference_row["fmonth"]
+        or extracted_row["fday"] != reference_row["fday"]
+    ):
+        filed_status = "Yes"
+
     if "Yes" in (patent_status, filed_status):
         flag = "Wrong"
-    elif "Missing" in (patent_status, filed_status):
-        flag = "Missing"
     else:
         flag = "Correct"
 
@@ -199,7 +252,8 @@ def run():
         ) as f:
             text = f.read()
 
-        patent_date, filed_date = extract_patent_dates(text)
+        patent_date, filed_date = extract_patent_dates(text, folder)
+
         pyear, pmonth, pday = split_date(patent_date)
         fyear, fmonth, fday = split_date(filed_date)
 
@@ -227,6 +281,7 @@ def run():
     for row in extracted_rows:
         ref_row = reference_dict.get(normalize_patnum(row["patnum"]))
         pw, fw, flag = compare_dates_with_flags(row, ref_row)
+
         final_rows.append(
             {
                 **row,

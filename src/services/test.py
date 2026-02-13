@@ -3,6 +3,7 @@ import csv
 import re
 import unicodedata
 from datetime import datetime
+from difflib import SequenceMatcher
 
 from dateparser import parse
 
@@ -43,6 +44,14 @@ def normalize_text(text):
     )
 
 
+def fuzzy_contains(line, target, threshold=0.72):
+    words = re.findall(r"[A-Za-z]{3,}", line.lower())
+    for word in words:
+        if SequenceMatcher(None, word, target).ratio() >= threshold:
+            return True
+    return False
+
+
 def extract_patent_dates(text):
     text = normalize_text(text)
     lines = text.splitlines()
@@ -62,18 +71,21 @@ def extract_patent_dates(text):
     filed_date = ""
 
     patent_patterns = [
-        r"patented\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"letters patent.*?dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"dated\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"patented\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        r"letters patent.*?dated\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        r"dated\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
     ]
 
     filed_patterns = [
-        r"application.*?filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"application filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"filed\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
-        r"application\s+([A-Za-z]+\.?\s+\d{1,2},\s+\d{4})",
+        r"application.*?filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        r"application filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        r"filed\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+        r"application\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
     ]
 
+    # =================================================
+    # ORIGINAL WORKING LOGIC (UNCHANGED)
+    # =================================================
     for line in combined_lines:
         if not patent_date:
             for pat in patent_patterns:
@@ -96,7 +108,57 @@ def extract_patent_dates(text):
         if patent_date and filed_date:
             break
 
-    # Sanity check
+    # =================================================
+    # GENERIC FUZZY RESCUE LAYER (ONLY IF MISSING)
+    # =================================================
+    if not patent_date or not filed_date:
+        flexible_date = r"([A-Za-z]{3,9}\.?\s+\d{1,2}[,\.]?\s+\d{4})"
+
+        for i, line in enumerate(lines):
+            m = re.search(flexible_date, line, re.I)
+            if not m:
+                continue
+
+            dt = parse(m.group(1))
+            if not dt:
+                continue
+
+            formatted = dt.strftime("%m/%d/%Y")
+
+            lower_line = line.lower()
+
+            # --- Filed detection (fuzzy) ---
+            if not filed_date:
+                if (
+                    fuzzy_contains(lower_line, "filed")
+                    or fuzzy_contains(lower_line, "application")
+                    or "[22]" in line
+                ):
+                    filed_date = formatted
+                    continue
+
+            # --- Patent detection (fuzzy) ---
+            if not patent_date:
+                if (
+                    fuzzy_contains(lower_line, "patented")
+                    or fuzzy_contains(lower_line, "issued")
+                    or "[45]" in line
+                ):
+                    patent_date = formatted
+                    continue
+
+            # --- Positional fallback ---
+            if not filed_date:
+                filed_date = formatted
+            elif not patent_date:
+                patent_date = formatted
+
+            if patent_date and filed_date:
+                break
+
+    # =================================================
+    # SANITY CHECK
+    # =================================================
     if patent_date and filed_date:
         if parse(filed_date) > parse(patent_date):
             filed_date = ""
