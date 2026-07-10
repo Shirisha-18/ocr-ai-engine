@@ -19,12 +19,12 @@ WHAT CHANGED FROM date4.py
     ("Application [date]" with no "filed" word).
 
 3.  Confidence tags are now mechanistic, not qualitative:
-        era_primary     — found by the pattern native to this patent's era
-        regex_A … regex_E — found by a different era's fallback pattern
-        body_scan       — found by generic FLEXIBLE_DATE sweep
-        universal_sweep — found by last-resort dateparser line sweep
-        MISSING         — structurally absent (Era A filing)
-        NONE            — all passes failed; needs manual review
+        primary              — found by the pattern native to this patent's era
+        regex_A … regex_E    — found by a different era's fallback pattern
+        body_scan            — found by generic FLEXIBLE_DATE sweep
+        full_scan            — found by last-resort dateparser line sweep
+        MISSING              — structurally absent (Era A filing)
+        NONE                 — all passes failed; needs manual review
 
 4.  ExtractionResult gains two new fields:
         issue_pass   : str   — which pass/regex found the issue date
@@ -36,11 +36,11 @@ WHAT CHANGED FROM date4.py
 6-PASS ARCHITECTURE (per date, per patent)
 ===========================================
     Pass 1  — era_classifier() — routes to primary extractor
-    Pass 2  — era-native primary extractor          → tag: era_primary
+    Pass 2  — era-native primary extractor          → tag: primary
     Pass 3  — adjacent-era fallbacks (±1, then ±2)  → tag: regex_X
     Pass 4  — all remaining era patterns             → tag: regex_X
     Pass 5  — generic FLEXIBLE_DATE body sweep       → tag: body_scan
-    Pass 6  — universal dateparser line sweep        → tag: universal_sweep
+    Pass 6  — universal dateparser line sweep        → tag: full_scan
     NONE    — all passes failed
 
 Pass 6 sanity gate: year must be in [EARLIEST_YEAR, LATEST_YEAR],
@@ -102,14 +102,14 @@ _ERA_ORDER = ["A", "B", "C", "D", "E", "F"]
 # =============================================================================
 
 # Confidence/pass tags — mechanistic, not qualitative
-PASS_ERA_PRIMARY = "era_primary"
+PASS_ERA_PRIMARY = "primary"
 PASS_REGEX_A = "regex_A"
 PASS_REGEX_B = "regex_B"
 PASS_REGEX_C = "regex_C"
 PASS_REGEX_D = "regex_D"
 PASS_REGEX_E = "regex_E"
 PASS_BODY_SCAN = "body_scan"
-PASS_UNIVERSAL = "universal_sweep"
+PASS_FULL_SCAN = "full_scan"
 PASS_MISSING = "MISSING"
 PASS_NONE = "NONE"
 
@@ -526,11 +526,11 @@ def _body_scan_filing(
 
 
 # =============================================================================
-# PASS 6 — UNIVERSAL SWEEP
+# PASS 6 — FULL SCAN WITH DATEPARSER
 # =============================================================================
 
 
-def _universal_sweep(all_lines: list, skip_date: Optional[str] = None) -> Optional[str]:
+def _full_scan(all_lines: list, skip_date: Optional[str] = None) -> Optional[str]:
     """
     Pass 6: run dateparser on every line in the document.
     Also tries numeric formats (MM/DD/YYYY, MM-DD-YYYY).
@@ -714,19 +714,19 @@ def _run_all_passes(
             filing_pass = PASS_BODY_SCAN
 
     # ----------------------------------------------------------------
-    # PASS 6 — universal sweep (dateparser on every line)
+    # PASS 6 — Full Scan (dateparser on every line)
     # ----------------------------------------------------------------
     if not issue_date:
-        candidate = _universal_sweep(all_lines, skip_date=filing_date)
+        candidate = _full_scan(all_lines, skip_date=filing_date)
         if candidate:
             issue_date = candidate
-            issue_pass = PASS_UNIVERSAL
+            issue_pass = PASS_FULL_SCAN
 
     if not filing_date and not filing_is_missing:
-        candidate = _universal_sweep(all_lines, skip_date=issue_date)
+        candidate = _full_scan(all_lines, skip_date=issue_date)
         if candidate:
             filing_date = candidate
-            filing_pass = PASS_UNIVERSAL
+            filing_pass = PASS_FULL_SCAN
 
     # ----------------------------------------------------------------
     # Final chronological sanity: filing must not be after issue
